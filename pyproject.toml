@@ -1,0 +1,15 @@
+[project]
+name = "ai-agent-cli"
+version = "0.1.0"
+description = "AI Agent CLI tool for learning agent architecture"
+requires-python = ">=3.11"
+dependencies = [
+    "langchain-core>=0.3",
+    "langchain-openai>=0.2",
+    "langchain-anthropic>=0.3",
+    "rich>=13.0",
+    "prompt-toolkit>=3.0",
+]
+
+[project.scripts]
+agent = "agent_cli.main:main"
