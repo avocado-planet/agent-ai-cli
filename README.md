@@ -13,6 +13,8 @@ source .venv/bin/activate
 pip install -e .
 export OPENAI_API_KEY="sk-..."
 python -m agent_cli.main
+# 作業終了時
+deactivate
 ```
 
 ## Slash Commands
