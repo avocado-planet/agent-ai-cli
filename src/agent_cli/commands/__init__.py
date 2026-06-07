@@ -166,10 +166,176 @@ class ExitCommand(SlashCommand):
         raise SystemExit(0)
 
 
+# --- Phase 2 Commands ---
+
+
+class SaveCommand(SlashCommand):
+    name = "save"
+    description = "Save session (e.g. /save my_session)"
+
+    def execute(self, args: str, repl: AgentREPL) -> str:
+        from agent_cli.session import save_session
+
+        if repl.state.message_count == 0:
+            return "Nothing to save — conversation is empty."
+        session_name = args.strip() or None
+        try:
+            path = save_session(repl.state, repl.config, name=session_name)
+            return f"Session saved: {path}"
+        except Exception as e:
+            return f"Save failed: {e}"
+
+
+class LoadCommand(SlashCommand):
+    name = "load"
+    description = "Load session (e.g. /load my_session)"
+
+    def execute(self, args: str, repl: AgentREPL) -> str:
+        from agent_cli.session import load_session
+
+        session_name = args.strip()
+        if not session_name:
+            return "Usage: /load <session_name>  (use /sessions to list)"
+
+        try:
+            state, config_dict = load_session(session_name)
+        except FileNotFoundError as e:
+            return str(e)
+        except Exception as e:
+            return f"Load failed: {e}"
+
+        # Restore state
+        repl.state = state
+
+        # Restore config and rebuild LLM
+        if config_dict:
+            repl.config.provider = config_dict.get("provider", repl.config.provider)
+            repl.config.model = config_dict.get("model", repl.config.model)
+            repl.config.temperature = config_dict.get("temperature", repl.config.temperature)
+            repl.config.max_tokens = config_dict.get("max_tokens", repl.config.max_tokens)
+            repl.config.system_prompt = config_dict.get("system_prompt", repl.config.system_prompt)
+            repl.rebuild_llm()
+
+        return (
+            f"Session loaded: {session_name}\n"
+            f"  Messages: {state.message_count}\n"
+            f"  Model: {repl.config.provider}/{repl.config.model}"
+        )
+
+
+class SessionsCommand(SlashCommand):
+    name = "sessions"
+    description = "List saved sessions"
+
+    def execute(self, args: str, repl: AgentREPL) -> str:
+        from agent_cli.session import list_sessions
+
+        sessions = list_sessions()
+        if not sessions:
+            return "No saved sessions found."
+
+        lines = ["Saved sessions:\n"]
+        for s in sessions:
+            saved = s["saved_at"][:19].replace("T", " ")  # trim to readable
+            lines.append(
+                f"  {s['name']:<20} {s['message_count']:>3} msgs  "
+                f"{s['model']:<25} {saved}"
+            )
+        return "\n".join(lines)
+
+
+class ExportCommand(SlashCommand):
+    name = "export"
+    description = "Export conversation as Markdown (e.g. /export chat.md)"
+
+    def execute(self, args: str, repl: AgentREPL) -> str:
+        from pathlib import Path
+        from agent_cli.session import export_as_markdown
+
+        if repl.state.message_count == 0:
+            return "Nothing to export — conversation is empty."
+
+        filename = args.strip() or "conversation.md"
+        if not filename.endswith(".md"):
+            filename += ".md"
+
+        md_content = export_as_markdown(repl.state, repl.config)
+        path = Path(filename)
+        path.write_text(md_content, encoding="utf-8")
+        return f"Conversation exported: {path.resolve()}"
+
+
+class CompactCommand(SlashCommand):
+    name = "compact"
+    description = "Summarize conversation to reduce token usage"
+
+    def execute(self, args: str, repl: AgentREPL) -> str:
+        from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+
+        if repl.state.message_count < 4:
+            return "Conversation too short to compact (need at least 4 messages)."
+
+        # Build a summarization request
+        summary_prompt = (
+            "Summarize the following conversation concisely. "
+            "Preserve key facts, decisions, and context that would be needed "
+            "to continue the conversation. Respond with the summary only.\n\n"
+        )
+        conversation_text = []
+        for msg in repl.state.messages:
+            if isinstance(msg, HumanMessage):
+                conversation_text.append(f"User: {msg.content}")
+            elif isinstance(msg, AIMessage):
+                conversation_text.append(f"Assistant: {msg.content}")
+
+        summary_messages = [
+            SystemMessage(content="You are a helpful summarizer."),
+            HumanMessage(content=summary_prompt + "\n".join(conversation_text)),
+        ]
+
+        try:
+            response = repl.llm.invoke(summary_messages)
+        except Exception as e:
+            return f"Compact failed: {e}"
+
+        old_count = repl.state.message_count
+        repl.state.clear()
+
+        # Insert the summary as context for future messages
+        repl.state.add_user_message("[Previous conversation summary]")
+        repl.state.add_ai_message(response.content)
+
+        return (
+            f"Compacted {old_count} messages → 2 (summary).\n"
+            f"Summary:\n{response.content[:300]}{'...' if len(response.content) > 300 else ''}"
+        )
+
+
+class ConfigCommand(SlashCommand):
+    name = "config"
+    description = "Show all current settings"
+
+    def execute(self, args: str, repl: AgentREPL) -> str:
+        c = repl.config
+        s = repl.state
+        return (
+            f"Current Configuration:\n"
+            f"  provider:      {c.provider}\n"
+            f"  model:         {c.model}\n"
+            f"  temperature:   {c.temperature}\n"
+            f"  max_tokens:    {c.max_tokens}\n"
+            f"  token_usage:   {c.show_token_usage}\n"
+            f"  messages:      {s.message_count}\n"
+            f"  total_tokens:  {s.total_input_tokens + s.total_output_tokens:,}\n"
+            f"\nSystem prompt:\n  {c.system_prompt[:100]}{'...' if len(c.system_prompt) > 100 else ''}"
+        )
+
+
 def create_default_registry() -> CommandRegistry:
     """Create registry with all built-in commands."""
     registry = CommandRegistry()
     for cmd_class in [
+        # Phase 1
         HelpCommand,
         ClearCommand,
         ModelCommand,
@@ -178,6 +344,13 @@ def create_default_registry() -> CommandRegistry:
         TemperatureCommand,
         TokensCommand,
         ExitCommand,
+        # Phase 2
+        SaveCommand,
+        LoadCommand,
+        SessionsCommand,
+        ExportCommand,
+        CompactCommand,
+        ConfigCommand,
     ]:
         registry.register(cmd_class())
     return registry
